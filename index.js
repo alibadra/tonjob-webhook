@@ -42,7 +42,7 @@ app.post('/webhook', async (req, res) => {
 
     // 🤖 Réponse Claude AI
     const aiResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 1000,
       system: `Tu es TONJOB AI, un assistant spécialisé dans la recherche d'emploi en Afrique francophone.
 Tu aides les candidats à :
