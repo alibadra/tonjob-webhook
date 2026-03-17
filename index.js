@@ -79,9 +79,9 @@ Maximum 3 paragraphes courts par réponse (format WhatsApp).`,
 
     console.log(`Réponse envoyée à ${userPhone}`);
 
-  } catch (error) {
-    console.error('Erreur:', error.message);
-  }
+ } catch (error) {
+  console.error('Erreur complète:', JSON.stringify(error.response?.data || error.message));
+}
 });
 
 const PORT = process.env.PORT || 3000;
