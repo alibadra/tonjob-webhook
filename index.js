@@ -137,17 +137,33 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ÉTAPE POSTE
-    if (step === 'ask_poste') {
-      profile.poste = userMessage;
-      await saveProfile(userPhone, profile);
-      await sendWhatsApp(userPhone,
-        `Super ! 👍 Vous cherchez un poste de *${userMessage}*.\n\n` +
-        `Dans *quelle ville ou quel pays* cherchez-vous ?\n` +
-        `_(Ex: Kinshasa, Dakar, Douala, Abidjan...)_`
-      );
-      await setStep(userPhone, 'ask_ville');
-      return;
-    }
+   if (step === 'ask_poste') {
+  const msgLower = userMessage.toLowerCase();
+  // Détecter si l'utilisateur n'a pas compris la question
+  if (
+    msgLower.includes('je cherche') ||
+    msgLower.includes('bonjour') ||
+    msgLower.includes('emploi') ||
+    userMessage.length < 3
+  ) {
+    await sendWhatsApp(userPhone,
+      `😊 Merci ! Mais j'ai besoin du *nom du poste ou métier* que vous recherchez.\n\n` +
+      `Par exemple :\n` +
+      `• Comptable\n• Développeur web\n• Infirmier\n• Directeur commercial\n\n` +
+      `*Quel est votre métier ?*`
+    );
+    return;
+  }
+  profile.poste = userMessage;
+  await saveProfile(userPhone, profile);
+  await sendWhatsApp(userPhone,
+    `Super ! 👍 Poste recherché : *${userMessage}*.\n\n` +
+    `Dans *quelle ville ou quel pays* cherchez-vous ?\n` +
+    `_(Ex: Kinshasa, Dakar, Douala, Abidjan...)_`
+  );
+  await setStep(userPhone, 'ask_ville');
+  return;
+}
 
     // ÉTAPE VILLE
     if (step === 'ask_ville') {
