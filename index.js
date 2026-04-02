@@ -87,12 +87,13 @@ app.post('/webhook', async (req, res) => {
 
     const userMessage = message.text.body.trim();
     const userPhone = message.from;
-    const step = await getStep(userPhone);
+    const msg = userMessage.toLowerCase();
     const profile = await getProfile(userPhone) || {};
+    const step = await getStep(userPhone);
 
     console.log(`[${userPhone}] step=${step} msg=${userMessage}`);
 
-    // COMMANDES ADMIN
+    // ===== COMMANDES ADMIN =====
     if (ADMIN_NUMBERS.includes(userPhone)) {
       if (userMessage.startsWith('ACTIVER:')) {
         const target = userMessage.split(':')[1].trim();
@@ -110,131 +111,223 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // RESET
-    if (userMessage.toUpperCase() === 'RESET' || userMessage.toUpperCase() === 'RECOMMENCER') {
-      await redisClient.del(`step:${userPhone}`);
-      await redisClient.del(`profile:${userPhone}`);
-      await setStep(userPhone, 'welcome');
-    }
-
-    // STOP
+    // ===== STOP =====
     if (userMessage.toUpperCase() === 'STOP') {
       await redisClient.sRem('abonnes:tous', userPhone);
-      await sendWhatsApp(userPhone, `✅ Vous avez été désinscrit des alertes emploi TONJOB. Tapez BONJOUR pour vous réinscrire.`);
+      await sendWhatsApp(userPhone,
+        `✅ Vous avez été désinscrit des alertes emploi TONJOB.\n\nTapez *BONJOUR* pour vous réinscrire à tout moment.`
+      );
       return;
     }
 
-    // ÉTAPE WELCOME
-    if (step === 'welcome' || userMessage.toUpperCase().includes('BONJOUR')) {
-      await sendWhatsApp(userPhone,
-        `👋 Bonjour et bienvenue sur *TONJOB AI* !\n\n` +
-        `Je suis votre assistant emploi en Afrique francophone. Je vais vous aider à trouver les meilleures opportunités et vous envoyer des alertes dès qu'une offre correspond à votre profil.\n\n` +
-        `Pour commencer, *quel poste ou métier recherchez-vous ?*\n` +
-        `_(Ex: Comptable, Développeur, Infirmier, Commercial...)_`
-      );
-      await setStep(userPhone, 'ask_poste');
+    // ===== RESET =====
+    if (userMessage.toUpperCase() === 'RESET') {
+      await redisClient.del(`step:${userPhone}`);
+      await redisClient.del(`profile:${userPhone}`);
+      await redisClient.sRem('abonnes:tous', userPhone);
+      await sendWhatsApp(userPhone, `✅ Profil réinitialisé. Tapez *BONJOUR* pour recommencer.`);
       return;
     }
 
-    // ÉTAPE POSTE
-   if (step === 'ask_poste') {
-  const msgLower = userMessage.toLowerCase();
-  // Détecter si l'utilisateur n'a pas compris la question
-  if (
-    msgLower.includes('je cherche') ||
-    msgLower.includes('bonjour') ||
-    msgLower.includes('emploi') ||
-    userMessage.length < 3
-  ) {
-    await sendWhatsApp(userPhone,
-      `😊 Merci ! Mais j'ai besoin du *nom du poste ou métier* que vous recherchez.\n\n` +
-      `Par exemple :\n` +
-      `• Comptable\n• Développeur web\n• Infirmier\n• Directeur commercial\n\n` +
-      `*Quel est votre métier ?*`
-    );
-    return;
-  }
-  profile.poste = userMessage;
-  await saveProfile(userPhone, profile);
-  await sendWhatsApp(userPhone,
-    `Super ! 👍 Poste recherché : *${userMessage}*.\n\n` +
-    `Dans *quelle ville ou quel pays* cherchez-vous ?\n` +
-    `_(Ex: Kinshasa, Dakar, Douala, Abidjan...)_`
-  );
-  await setStep(userPhone, 'ask_ville');
-  return;
-}
-
-    // ÉTAPE VILLE
-    if (step === 'ask_ville') {
-      profile.ville = userMessage;
-      await saveProfile(userPhone, profile);
-      await sendWhatsApp(userPhone,
-        `Parfait ! 📍 Zone : *${userMessage}*\n\n` +
-        `Quel est votre *niveau d'expérience* ?\n\n` +
-        `1️⃣ Débutant (0-2 ans)\n` +
-        `2️⃣ Intermédiaire (2-5 ans)\n` +
-        `3️⃣ Senior (5+ ans)\n` +
-        `4️⃣ Stage / Apprentissage`
-      );
-      await setStep(userPhone, 'ask_niveau');
-      return;
-    }
-
-    // ÉTAPE NIVEAU
-    if (step === 'ask_niveau') {
-      const niveaux = { '1': 'Débutant', '2': 'Intermédiaire', '3': 'Senior', '4': 'Stage' };
-      profile.niveau = niveaux[userMessage] || userMessage;
-      await saveProfile(userPhone, profile);
-      await redisClient.sAdd('abonnes:tous', userPhone);
-      await sendWhatsApp(userPhone,
-        `Excellent ! 🎯 Profil enregistré :\n\n` +
-        `👤 *Poste :* ${profile.poste}\n` +
-        `📍 *Zone :* ${profile.ville}\n` +
-        `📊 *Niveau :* ${profile.niveau}\n\n` +
-        `✅ Vous êtes inscrit aux *alertes emploi TONJOB* !\n` +
-        `Dès qu'une offre correspond à votre profil sur *tonjob.net*, vous recevrez une notification ici.\n\n` +
-        `💬 Posez-moi vos questions sur votre recherche, votre CV ou vos entretiens !`
-      );
+    // ===== UTILISATEUR DÉJÀ ENREGISTRÉ =====
+    // Si profil complet → aller directement en mode actif
+    if (profile.poste && profile.ville && step !== 'ask_poste' && step !== 'ask_ville') {
       await setStep(userPhone, 'active');
-      return;
-    }
 
-    // MODE ACTIF — Claude AI
-    if (step === 'active') {
+      // ===== RÉPONSES FIXES (sans Claude) =====
+
+      // Lettre de motivation
+      if (msg.includes('lettre') || msg.includes('motivation')) {
+        await sendWhatsApp(userPhone,
+          `📝 *Lettre de motivation*\n\n` +
+          `Retrouvez nos modèles et conseils pour rédiger une lettre percutante sur :\n` +
+          `👉 *tonjob.net/blog*\n\n` +
+          `Conseils adaptés au marché africain, exemples concrets et erreurs à éviter.`
+        );
+        return;
+      }
+
+      // CV
+      if (msg.includes(' cv') || msg.startsWith('cv') || msg.includes('curriculum') || msg.includes('améliorer mon cv') || msg.includes('rédiger mon cv')) {
+        await sendWhatsApp(userPhone,
+          `📄 *Conseils CV*\n\n` +
+          `Nos guides pour créer un CV qui attire les recruteurs :\n` +
+          `👉 *tonjob.net/blog*\n\n` +
+          `Structure, mise en page, mots-clés — tout ce qu'il faut pour vous démarquer.`
+        );
+        return;
+      }
+
+      // Entretien
+      if (msg.includes('entretien') || msg.includes('interview') || msg.includes('préparer')) {
+        await sendWhatsApp(userPhone,
+          `🎯 *Préparation entretien*\n\n` +
+          `Consultez nos conseils pour réussir vos entretiens :\n` +
+          `👉 *tonjob.net/blog*\n\n` +
+          `Questions fréquentes, attitudes gagnantes, tenues vestimentaires et erreurs à éviter.`
+        );
+        return;
+      }
+
+      // Pas d'offre pour une ville
+      if ((msg.includes('pas d\'offre') || msg.includes('pas d offre') || msg.includes('aucune offre') || msg.includes('offre') || msg.includes('emploi')) && (msg.includes('ville') || msg.includes('pour') || msg.includes('à') || msg.includes('au') || msg.includes('en '))) {
+        await sendWhatsApp(userPhone,
+          `🔍 *Offres d'emploi*\n\n` +
+          `Consultez toutes les offres disponibles sur :\n` +
+          `👉 *tonjob.net*\n\n` +
+          `Les offres sont mises à jour quotidiennement. Si votre ville n'apparaît pas encore, c'est que nous n'avons pas encore d'offres dans cette zone pour le moment — mais vous recevrez une alerte dès qu'une offre correspond à votre profil ! 🔔`
+        );
+        return;
+      }
+
+      // Offres pour un métier
+      if (msg.includes('offre') || msg.includes('poste') || msg.includes('recrutement') || msg.includes('emploi')) {
+        await sendWhatsApp(userPhone,
+          `💼 *Offres d'emploi*\n\n` +
+          `Retrouvez toutes les offres correspondant à votre profil sur :\n` +
+          `👉 *tonjob.net*\n\n` +
+          `Filtrez par métier, ville et secteur pour affiner votre recherche.`
+        );
+        return;
+      }
+
+      // Lien qui ne marche plus
+      if (msg.includes('lien') || msg.includes('lien ne marche') || msg.includes('ne fonctionne') || msg.includes('expiré') || msg.includes('erreur') || msg.includes('postuler')) {
+        await sendWhatsApp(userPhone,
+          `⏰ *Offre expirée*\n\n` +
+          `Si le lien de candidature ne fonctionne plus, c'est probablement que le délai de candidature a expiré ou que le poste a été pourvu.\n\n` +
+          `Consultez les offres encore actives sur :\n` +
+          `👉 *tonjob.net*\n\n` +
+          `De nouvelles offres sont publiées chaque jour !`
+        );
+        return;
+      }
+
+      // Salaire
+      if (msg.includes('salaire') || msg.includes('rémunération') || msg.includes('combien') || msg.includes('paye')) {
+        await sendWhatsApp(userPhone,
+          `💰 *Salaires*\n\n` +
+          `Les salaires varient selon le poste, l'entreprise, la ville et l'expérience.\n\n` +
+          `Consultez les offres sur *tonjob.net* — beaucoup précisent la fourchette salariale. Notre blog propose aussi des guides sur les salaires par secteur :\n` +
+          `👉 *tonjob.net/blog*`
+        );
+        return;
+      }
+
+      // Bonjour / re-bonjour
+      if (msg.includes('bonjour') || msg.includes('bonsoir') || msg.includes('salut') || msg.includes('hello')) {
+        await sendWhatsApp(userPhone,
+          `👋 Bon retour *${profile.poste ? `— je me souviens que vous cherchez un poste de ${profile.poste} à ${profile.ville}` : ''}* !\n\n` +
+          `Comment puis-je vous aider aujourd'hui ?\n\n` +
+          `• 🔍 Offres d'emploi → *tonjob.net*\n` +
+          `• 📝 Conseils CV & lettre → *tonjob.net/blog*\n` +
+          `• 🎯 Préparer un entretien\n` +
+          `• 🔔 Vous êtes inscrit aux alertes emploi`
+        );
+        return;
+      }
+
+      // Merci
+      if (msg.includes('merci') || msg.includes('thank')) {
+        await sendWhatsApp(userPhone,
+          `😊 Avec plaisir ! Bonne chance dans votre recherche d'emploi.\n\n` +
+          `N'hésitez pas à revenir si vous avez d'autres questions. Je vous enverrai une alerte dès qu'une offre correspond à votre profil sur *tonjob.net* ! 🍀`
+        );
+        return;
+      }
+
+      // ===== CLAUDE AI pour questions complexes =====
       const aiResponse = await anthropic.messages.create({
         model: 'claude-sonnet-4-5-20250929',
         max_tokens: 800,
-       system: `Tu es TONJOB AI, l'assistant officiel de TONJOB.net.
+        system: `Tu es TONJOB AI, l'assistant officiel de TONJOB.net.
 
 CE QUI EXISTE VRAIMENT SUR TONJOB.NET :
 - Des offres d'emploi consultables et filtrables par pays, ville et secteur
 - Un blog avec conseils CV, lettres de motivation et préparation entretien : tonjob.net/blog
 
 CE QUI N'EXISTE PAS (ne jamais mentionner) :
-- Création de profil ou compte candidat
+- Création de profil ou compte candidat sur le site
 - Modèles de CV téléchargeables sur le site
 - Candidature en ligne directe depuis le site
-- Base de données de candidats
 
 RÈGLES STRICTES :
 - Pour les offres d'emploi → tonjob.net
-- Pour les conseils CV, lettres de motivation, entretiens → tonjob.net/blog
+- Pour les conseils CV, lettres, entretiens → tonjob.net/blog
 - Ne jamais inventer des fonctionnalités qui n'existent pas
-- Ne jamais mentionner d'autres plateformes
+- Ne jamais mentionner d'autres plateformes concurrentes
 - Réponds en français, max 3 paragraphes courts, format WhatsApp
-- Si tu ne sais pas → dis simplement de consulter tonjob.net
 
-Profil utilisateur : Poste: ${profile.poste || 'non renseigné'}, Zone: ${profile.ville || 'non renseignée'}, Niveau: ${profile.niveau || 'non renseigné'}.`,
+Profil utilisateur : Poste: ${profile.poste || 'non renseigné'}, Zone: ${profile.ville || 'non renseignée'}.`,
+        messages: [{ role: 'user', content: userMessage }]
       });
       await sendWhatsApp(userPhone, aiResponse.content[0].text);
       return;
     }
 
-    // FALLBACK
+    // ===== FLOW INSCRIPTION (nouveaux utilisateurs) =====
+
+    // Étape welcome
+    if (step === 'welcome' || msg.includes('bonjour') || msg.includes('salut') || msg.includes('hello') || msg.includes('bonsoir')) {
+      await sendWhatsApp(userPhone,
+        `👋 Bonjour et bienvenue sur *TONJOB AI* !\n\n` +
+        `Je suis votre assistant emploi en Afrique francophone. Je vais vous inscrire aux *alertes emploi* pour vous notifier dès qu'une offre correspond à votre profil.\n\n` +
+        `*Quel poste ou métier recherchez-vous ?*\n` +
+        `_(Ex: Comptable, Développeur, Infirmier, Commercial...)_`
+      );
+      await setStep(userPhone, 'ask_poste');
+      return;
+    }
+
+    // Étape poste
+    if (step === 'ask_poste') {
+      const msgLower = userMessage.toLowerCase();
+      if (
+        msgLower.includes('je cherche') ||
+        msgLower.includes('bonjour') ||
+        msgLower.includes('emploi') ||
+        userMessage.length < 3
+      ) {
+        await sendWhatsApp(userPhone,
+          `😊 J'ai besoin du *nom exact du poste ou métier* que vous recherchez.\n\n` +
+          `Par exemple : *Comptable*, *Développeur web*, *Infirmier*, *Directeur commercial*\n\n` +
+          `*Quel est votre métier ?*`
+        );
+        return;
+      }
+      profile.poste = userMessage;
+      await saveProfile(userPhone, profile);
+      await sendWhatsApp(userPhone,
+        `Super ! 👍 Poste recherché : *${userMessage}*\n\n` +
+        `Dans *quelle ville ou quel pays* cherchez-vous ?\n` +
+        `_(Ex: Kinshasa, Dakar, Douala, Abidjan, RDC, Sénégal...)_`
+      );
+      await setStep(userPhone, 'ask_ville');
+      return;
+    }
+
+    // Étape ville
+    if (step === 'ask_ville') {
+      profile.ville = userMessage;
+      await saveProfile(userPhone, profile);
+      await redisClient.sAdd('abonnes:tous', userPhone);
+      await setStep(userPhone, 'active');
+      await sendWhatsApp(userPhone,
+        `Parfait ! 🎯 Profil enregistré :\n\n` +
+        `💼 *Poste :* ${profile.poste}\n` +
+        `📍 *Zone :* ${profile.ville}\n\n` +
+        `✅ Vous êtes inscrit aux *alertes emploi TONJOB* !\n` +
+        `Dès qu'une offre correspond à votre profil sur *tonjob.net*, vous recevrez une notification ici.\n\n` +
+        `En attendant, consultez les offres disponibles sur *tonjob.net* 🚀\n\n` +
+        `💬 Posez-moi vos questions : CV, lettre de motivation, entretien...`
+      );
+      return;
+    }
+
+    // Fallback
     await setStep(userPhone, 'welcome');
     await sendWhatsApp(userPhone,
-      `👋 Bonjour ! Je suis *TONJOB AI*.\nTapez *BONJOUR* pour commencer ! 🚀`
+      `👋 Bonjour ! Je suis *TONJOB AI*, votre assistant emploi.\nTapez *BONJOUR* pour commencer ! 🚀`
     );
 
   } catch (error) {
