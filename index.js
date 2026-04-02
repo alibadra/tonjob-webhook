@@ -243,9 +243,3 @@ async function broadcastOffre({ titre, ville, secteur, lien }) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`TONJOB Webhook actif sur le port ${PORT}`));
 ```
-
----
-
-**Comment envoyer une alerte offre depuis votre WhatsApp :**
-```
-OFFRE:Comptable Senior|Kinshasa|Finance|tonjob.net/offre/123
