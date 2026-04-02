@@ -8,46 +8,35 @@ const app = express();
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-// Connexion Redis
 const redisClient = redis.createClient({ url: process.env.REDIS_URL });
 redisClient.connect().catch(console.error);
 
-const FREE_LIMIT = 3; // messages gratuits par jour
-
-async function getMessageCount(phone) {
-  const key = `msg:${phone}:${new Date().toISOString().slice(0,10)}`;
-  const count = await redisClient.get(key);
-  return parseInt(count || '0');
-}
-
-async function incrementMessageCount(phone) {
-  const key = `msg:${phone}:${new Date().toISOString().slice(0,10)}`;
-  await redisClient.incr(key);
-  await redisClient.expire(key, 86400); // expire après 24h
-}
-
-async function isPremium(phone) {
-  const val = await redisClient.get(`premium:${phone}`);
-  return val === '1';
-}
+const ADMIN_NUMBERS = ['32483273024']; // Votre numéro belge
 
 async function sendWhatsApp(to, text) {
   await axios.post(
     `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    }
+    { messaging_product: 'whatsapp', to, type: 'text', text: { body: text } },
+    { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
   );
+}
+
+async function getProfile(phone) {
+  const data = await redisClient.get(`profile:${phone}`);
+  return data ? JSON.parse(data) : null;
+}
+
+async function saveProfile(phone, profile) {
+  await redisClient.set(`profile:${phone}`, JSON.stringify(profile));
+}
+
+async function getStep(phone) {
+  const step = await redisClient.get(`step:${phone}`);
+  return step || 'welcome';
+}
+
+async function setStep(phone, step) {
+  await redisClient.set(`step:${phone}`, step);
 }
 
 // Vérification webhook Meta
@@ -56,14 +45,13 @@ app.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
   if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-    console.log('Webhook vérifié !');
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
   }
 });
 
-// Réception des messages
+// Réception messages
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
@@ -72,67 +60,192 @@ app.post('/webhook', async (req, res) => {
     const message = changes?.value?.messages?.[0];
     if (!message || message.type !== 'text') return;
 
-    const userMessage = message.text.body;
+    const userMessage = message.text.body.trim();
     const userPhone = message.from;
+    const step = await getStep(userPhone);
+    const profile = await getProfile(userPhone) || {};
 
-    console.log(`Message de ${userPhone}: ${userMessage}`);
+    console.log(`[${userPhone}] step=${step} msg=${userMessage}`);
 
-    const premium = await isPremium(userPhone);
-    const count = await getMessageCount(userPhone);
+    // ===== COMMANDES ADMIN =====
+    if (ADMIN_NUMBERS.includes(userPhone)) {
 
-    // Limite gratuite atteinte
-    if (!premium && count >= FREE_LIMIT) {
+      // Activer Premium
+      if (userMessage.startsWith('ACTIVER:')) {
+        const target = userMessage.split(':')[1].trim();
+        await redisClient.set(`premium:${target}`, '1');
+        await sendWhatsApp(userPhone, `✅ ${target} activé Premium !`);
+        await sendWhatsApp(target, `🎉 Votre compte TONJOB Premium est activé ! Messages illimités disponibles.`);
+        return;
+      }
+
+      // Envoyer une alerte offre à tous les abonnés matchant
+      // Format: OFFRE:Titre|Ville|Secteur|Lien
+      if (userMessage.startsWith('OFFRE:')) {
+        const parts = userMessage.replace('OFFRE:', '').split('|');
+        const [titre, ville, secteur, lien] = parts;
+        await broadcastOffre({ titre, ville, secteur, lien });
+        await sendWhatsApp(userPhone, `✅ Alerte offre envoyée : ${titre} — ${ville}`);
+        return;
+      }
+    }
+
+    // ===== RESET =====
+    if (userMessage.toUpperCase() === 'RESET' || userMessage.toUpperCase() === 'RECOMMENCER') {
+      await redisClient.del(`step:${userPhone}`);
+      await redisClient.del(`profile:${userPhone}`);
+      await setStep(userPhone, 'welcome');
+    }
+
+    // ===== FLOW COLLECTE PROFIL =====
+
+    // Étape 0 — Accueil
+    if (step === 'welcome' || userMessage.toUpperCase() === 'BONJOUR' || userMessage.toLowerCase().includes('bonjour tonjob')) {
       await sendWhatsApp(userPhone,
-        `⚠️ Vous avez atteint votre limite de ${FREE_LIMIT} messages gratuits aujourd'hui.\n\n` +
-        `🌟 *Passez Premium à 2$/mois* pour :\n` +
-        `✅ Messages illimités\n` +
-        `✅ Génération de CV\n` +
-        `✅ Alertes emploi personnalisées\n\n` +
-        `👉 Abonnez-vous sur : *tonjob.net/premium*\n\n` +
-        `_Vos messages reprennent automatiquement demain._`
+        `👋 Bonjour et bienvenue sur *TONJOB AI* !\n\n` +
+        `Je suis votre assistant emploi en Afrique francophone. Je vais vous aider à trouver les meilleures opportunités et vous envoyer des alertes dès qu'une offre correspond à votre profil.\n\n` +
+        `Pour commencer, *quel poste ou métier recherchez-vous ?*\n` +
+        `_(Ex: Comptable, Développeur, Infirmier, Commercial...)_`
       );
+      await setStep(userPhone, 'ask_poste');
       return;
     }
 
-    // Incrémenter compteur
-    await incrementMessageCount(userPhone);
-
-    // Message d'avertissement à 1 message restant
-    if (!premium && count === FREE_LIMIT - 1) {
+    // Étape 1 — Collecte poste
+    if (step === 'ask_poste') {
+      profile.poste = userMessage;
+      await saveProfile(userPhone, profile);
       await sendWhatsApp(userPhone,
-        `💡 _Il vous reste 1 message gratuit aujourd'hui. Passez Premium sur tonjob.net/premium pour un accès illimité !_`
+        `Super ! 👍 Vous cherchez un poste de *${userMessage}*.\n\n` +
+        `Dans *quelle ville ou quel pays* cherchez-vous ?\n` +
+        `_(Ex: Kinshasa, Dakar, Douala, Abidjan, ou plusieurs pays...)_`
       );
+      await setStep(userPhone, 'ask_ville');
+      return;
     }
 
-    // Réponse Claude AI
-    const aiResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 1000,
-      system: `Tu es TONJOB AI, l'assistant officiel de TONJOB.net, la plateforme d'emploi de référence en Afrique francophone.
+    // Étape 2 — Collecte ville
+    if (step === 'ask_ville') {
+      profile.ville = userMessage;
+      await saveProfile(userPhone, profile);
+      await sendWhatsApp(userPhone,
+        `Parfait ! 📍 Zone : *${userMessage}*\n\n` +
+        `Quel est votre *niveau d'expérience* ?\n\n` +
+        `1️⃣ Débutant (0-2 ans)\n` +
+        `2️⃣ Intermédiaire (2-5 ans)\n` +
+        `3️⃣ Senior (5+ ans)\n` +
+        `4️⃣ Stage / Apprentissage`
+      );
+      await setStep(userPhone, 'ask_niveau');
+      return;
+    }
 
-Tu aides les candidats à :
-- Trouver des offres d'emploi adaptées à leur profil
-- Rédiger leur CV et lettre de motivation
-- Préparer leurs entretiens
-- Comprendre le marché de l'emploi local
+    // Étape 3 — Collecte niveau
+    if (step === 'ask_niveau') {
+      const niveaux = { '1': 'Débutant', '2': 'Intermédiaire', '3': 'Senior', '4': 'Stage' };
+      profile.niveau = niveaux[userMessage] || userMessage;
+      await saveProfile(userPhone, profile);
+      await sendWhatsApp(userPhone,
+        `Excellent ! 🎯 Profil enregistré :\n\n` +
+        `👤 *Poste :* ${profile.poste}\n` +
+        `📍 *Zone :* ${profile.ville}\n` +
+        `📊 *Niveau :* ${profile.niveau}\n\n` +
+        `✅ Vous êtes maintenant inscrit aux *alertes emploi TONJOB* !\n` +
+        `Dès qu'une offre correspondant à votre profil est publiée sur *tonjob.net*, vous recevrez une notification directement ici.\n\n` +
+        `En attendant, consultez les offres disponibles sur *tonjob.net* 🚀\n\n` +
+        `💬 Vous pouvez aussi me poser des questions sur votre recherche d'emploi, votre CV ou la préparation d'entretien.`
+      );
+      await setStep(userPhone, 'active');
 
-RÈGLES IMPORTANTES :
-- Tu diriges TOUJOURS vers tonjob.net pour les offres d'emploi
-- Tu ne mentionnes JAMAIS d'autres plateformes (LinkedIn, emploi.cm, lesmetiers.net, etc.)
-- Tu es chaleureux, concis et utile
-- Maximum 3 paragraphes courts par réponse (format WhatsApp)
-- Tu réponds toujours en français`,
-      messages: [{ role: 'user', content: userMessage }]
-    });
+      // Enregistrer dans la liste des abonnés
+      await redisClient.sAdd(`abonnes:${profile.poste.toLowerCase()}:${profile.ville.toLowerCase()}`, userPhone);
+      await redisClient.sAdd('abonnes:tous', userPhone);
 
-    const replyText = aiResponse.content[0].text;
-    await sendWhatsApp(userPhone, replyText);
-    console.log(`Réponse envoyée à ${userPhone} (message ${count + 1}/${FREE_LIMIT})`);
+      return;
+    }
+
+    // ===== MODE ACTIF — Questions libres via Claude AI =====
+    if (step === 'active') {
+
+      // Questions simples sans API
+      const msg = userMessage.toLowerCase();
+      if (msg.includes('offre') && (msg.includes('tonjob') || msg.includes('site'))) {
+        await sendWhatsApp(userPhone,
+          `🔍 Consultez toutes les offres disponibles sur *tonjob.net*\n\n` +
+          `Filtrez par ville, secteur et niveau d'expérience pour trouver les offres qui vous correspondent !`
+        );
+        return;
+      }
+
+      // Claude AI pour questions complexes
+      const aiResponse = await anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 800,
+        system: `Tu es TONJOB AI, l'assistant officiel de TONJOB.net, plateforme d'emploi en Afrique francophone.
+L'utilisateur a ce profil : Poste recherché: ${profile.poste || 'non renseigné'}, Zone: ${profile.ville || 'non renseignée'}, Niveau: ${profile.niveau || 'non renseigné'}.
+RÈGLES : Dirige TOUJOURS vers tonjob.net. Ne mentionne JAMAIS d'autres plateformes. Réponds en français, max 3 paragraphes courts, format WhatsApp.`,
+        messages: [{ role: 'user', content: userMessage }]
+      });
+
+      await sendWhatsApp(userPhone, aiResponse.content[0].text);
+      return;
+    }
+
+    // Fallback — si aucun step reconnu
+    await setStep(userPhone, 'welcome');
+    await sendWhatsApp(userPhone,
+      `👋 Bonjour ! Je suis *TONJOB AI*, votre assistant emploi en Afrique francophone.\n\n` +
+      `Tapez *BONJOUR* pour commencer votre inscription aux alertes emploi ! 🚀`
+    );
 
   } catch (error) {
     console.error('Erreur:', JSON.stringify(error.response?.data || error.message));
   }
 });
 
+// ===== BROADCAST OFFRE AUX ABONNÉS =====
+async function broadcastOffre({ titre, ville, secteur, lien }) {
+  try {
+    // Récupérer tous les abonnés
+    const abonnes = await redisClient.sMembers('abonnes:tous');
+    let envoyes = 0;
+
+    for (const phone of abonnes) {
+      const profile = await getProfile(phone);
+      if (!profile) continue;
+
+      // Vérifier si l'offre matche le profil (matching simple)
+      const villeMatch = !ville || profile.ville?.toLowerCase().includes(ville.toLowerCase()) || ville.toLowerCase().includes(profile.ville?.toLowerCase());
+      const posteMatch = !secteur || profile.poste?.toLowerCase().includes(secteur.toLowerCase()) || secteur.toLowerCase().includes(profile.poste?.toLowerCase());
+
+      if (villeMatch || posteMatch) {
+        await sendWhatsApp(phone,
+          `🔔 *Nouvelle offre pour vous sur TONJOB !*\n\n` +
+          `💼 *Poste :* ${titre}\n` +
+          `📍 *Lieu :* ${ville}\n\n` +
+          `👉 Postulez maintenant : *${lien || 'tonjob.net'}*\n\n` +
+          `_Pour ne plus recevoir d'alertes, tapez STOP_`
+        );
+        envoyes++;
+        // Petite pause pour éviter le spam Meta
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    console.log(`Alertes envoyées : ${envoyes}/${abonnes.length}`);
+  } catch (err) {
+    console.error('Erreur broadcast:', err.message);
+  }
+}
+
+// ===== STOP =====
+// Géré dans le flow principal — à ajouter si besoin
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`TONJOB Webhook actif sur le port ${PORT}`));
+```
+
+---
+
+**Comment envoyer une alerte offre depuis votre WhatsApp :**
+```
+OFFRE:Comptable Senior|Kinshasa|Finance|tonjob.net/offre/123
